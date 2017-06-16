@@ -87,6 +87,7 @@ static int	acpi_video_vo_check_level(struct acpi_video_output *, int);
 static void	acpi_video_vo_notify_handler(ACPI_HANDLE, UINT32, void *);
 static int	acpi_video_vo_active_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_video_vo_bright_sysctl(SYSCTL_HANDLER_ARGS);
+static int	acpi_video_vo_adjust_bright_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_video_vo_presets_sysctl(SYSCTL_HANDLER_ARGS);
 static int	acpi_video_vo_levels_sysctl(SYSCTL_HANDLER_ARGS);
 
@@ -554,6 +555,12 @@ acpi_video_vo_init(UINT32 adr)
 			    "current brightness level");
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
+			    OID_AUTO, "adjust_brightness",
+			    CTLTYPE_STRING|CTLFLAG_RW|CTLFLAG_ANYBODY, vo, 0,
+			    acpi_video_vo_adjust_bright_sysctl, "A",
+			    "adjust current brightness level");
+			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
+			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "fullpower",
 			    CTLTYPE_INT|CTLFLAG_RW, vo,
 			    POWER_PROFILE_PERFORMANCE,
@@ -794,6 +801,63 @@ acpi_video_vo_bright_sysctl(SYSCTL_HANDLER_ARGS)
 	err = sysctl_handle_int(oidp, &level, 0, req);
 	if (err != 0 || req->newptr == NULL)
 		goto out;
+	if (level < -1 || level > 100) {
+		err = EINVAL;
+		goto out;
+	}
+
+	if (level != -1 && (err = acpi_video_vo_check_level(vo, level)))
+		goto out;
+	vo->vo_brightness = level;
+	vo_set_brightness(vo->handle, (level == -1) ? preset : level);
+
+out:
+	ACPI_SERIAL_END(video_output);
+	return (err);
+}
+
+/* ARGSUSED */
+static int
+acpi_video_vo_adjust_bright_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct acpi_video_output *vo;
+	int level, preset, tmp, err;
+	char buf[6];
+
+	vo = (struct acpi_video_output *)arg1;
+	ACPI_SERIAL_BEGIN(video_output);
+	if (vo->handle == NULL) {
+		err = ENXIO;
+		goto out;
+	}
+	if (vo->vo_levels == NULL) {
+		err = ENODEV;
+		goto out;
+	}
+
+	preset = (power_profile_get_state() == POWER_PROFILE_ECONOMY) ?
+		  vo->vo_economy : vo->vo_fullpower;
+	level = vo->vo_brightness;
+	if (level == -1)
+		level = preset;
+
+	snprintf(buf, sizeof(buf), "%u%%", level);
+	err = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	if (err != 0 || req->newptr == NULL)
+		goto out;
+
+	if (sscanf(buf, "+%u", &tmp) ||
+	    sscanf(buf, "+%u%%", &tmp))
+		level = min(level + tmp, 100);
+	else if (sscanf(buf, "-%d", &tmp) ||
+	    sscanf(buf, "-%u%%", &tmp))
+		level = max(level - tmp, 0);
+	else if (sscanf(buf, "%u", &tmp) ||
+	    sscanf(buf, "%u%%", &tmp))
+		level = tmp;
+	else
+		level = -2;
+
 	if (level < -1 || level > 100) {
 		err = EINVAL;
 		goto out;
